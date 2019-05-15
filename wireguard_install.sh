@@ -15,7 +15,7 @@ fi
 #更新内核
 update_kernel(){
 
-    yum -y install epel-release
+    yum -y install epel-release curl
     sed -i "0,/enabled=0/s//enabled=1/" /etc/yum.repos.d/epel.repo
     yum remove -y kernel-devel
     rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
@@ -30,7 +30,7 @@ update_kernel(){
     read -p "需要重启VPS，再次执行脚本选择安装wireguard，是否现在重启 ? [Y/n] :" yn
 	[ -z "${yn}" ] && yn="y"
 	if [[ $yn == [Yy] ]]; then
-		echo -e "${Info} VPS 重启中..."
+		echo -e "VPS 重启中..."
 		reboot
 	fi
 }
@@ -41,6 +41,18 @@ rand(){
     max=$(($2-$min+1))
     num=$(cat /dev/urandom | head -n 10 | cksum | awk -F ' ' '{print $1}')
     echo $(($num%$max+$min))  
+}
+
+wireguard_update(){
+    yum update -y wireguard-dkms wireguard-tools
+    echo "更新完成"
+}
+
+wireguard_remove(){
+    wg-quick down wg0
+    yum remove -y wireguard-dkms wireguard-tools
+    rm -rf /etc/wireguard/
+    echo "卸载完成"
 }
 
 config_client(){
@@ -76,6 +88,7 @@ wireguard_install(){
     c2=$(cat cpublickey)
     serverip=$(curl ipv4.icanhazip.com)
     port=$(rand 10000 60000)
+    eth=$(ls /sys/class/net | awk '/^e/{print}')
     chmod 777 -R /etc/wireguard
     systemctl stop firewalld
     systemctl disable firewalld
@@ -89,13 +102,14 @@ wireguard_install(){
     service iptables save
     service iptables restart
     echo 1 > /proc/sys/net/ipv4/ip_forward
-    echo "net.ipv4.ip_forward = 1" > /etc/sysctl.conf	
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+    sysctl -p
 cat > /etc/wireguard/wg0.conf <<-EOF
 [Interface]
 PrivateKey = $s1
 Address = 10.0.0.1/24 
-PostUp   = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+PostUp   = echo 1 > /proc/sys/net/ipv4/ip_forward; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $eth -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $eth -j MASQUERADE
 ListenPort = $port
 DNS = 8.8.8.8
 MTU = 1420
@@ -112,7 +126,26 @@ EOF
     echo "电脑端请下载client.conf，手机端可直接使用软件扫码"
     echo "${content}" | qrencode -o - -t UTF8
 }
+add_user(){
+    echo -e "\033[37;41m给新用户起个名字，不能和已有用户重复\033[0m"
+    read -p "请输入用户名：" newname
+    cd /etc/wireguard/
+    cp client.conf $newname.conf
+    wg genkey | tee temprikey | wg pubkey > tempubkey
+    ipnum=$(grep Allowed /etc/wireguard/wg0.conf | tail -1 | awk -F '[ ./]' '{print $6}')
+    newnum=$((10#${ipnum}+1))
+    sed -i 's%^PrivateKey.*$%'"PrivateKey = $(cat temprikey)"'%' $newname.conf
+    sed -i 's%^Address.*$%'"Address = 10.0.0.$newnum\/24"'%' $newname.conf
 
+cat >> /etc/wireguard/wg0.conf <<-EOF
+[Peer]
+PublicKey = $(cat tempubkey)
+AllowedIPs = 10.0.0.$newnum/32
+EOF
+    wg set wg0 peer $(cat tempubkey) allowed-ips 10.0.0.$newnum/32
+    echo -e "\033[37;41m添加完成，文件：/etc/wireguard/$newname.conf\033[0m"
+    rm -f temprikey tempubkey
+}
 #开始菜单
 start_menu(){
     clear
@@ -124,7 +157,11 @@ start_menu(){
     echo "========================="
     echo "1. 升级系统内核"
     echo "2. 安装wireguard"
-    echo "3. 退出脚本"
+    echo "3. 升级wireguard"
+    echo "4. 卸载wireguard"
+    echo "5. 显示客户端二维码"
+    echo "6. 增加用户"
+    echo "0. 退出脚本"
     echo
     read -p "请输入数字:" num
     case "$num" in
@@ -135,6 +172,19 @@ start_menu(){
 	wireguard_install
 	;;
 	3)
+	wireguard_update
+	;;
+	4)
+	wireguard_remove
+	;;
+	5)
+	content=$(cat /etc/wireguard/client.conf)
+    	echo "${content}" | qrencode -o - -t UTF8
+	;;
+	6)
+	add_user
+	;;
+	0)
 	exit 1
 	;;
 	*)
